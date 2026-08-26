@@ -1,7 +1,7 @@
 """Real import job: pull Central + state bare acts from India Code into our own
-tables (Act/Chapter/Section). Not live scraping - this is meant to be run
-manually or on a schedule (e.g. monthly), never per user request, and never
-as part of the ams app server.
+tables (Act/Chapter/Section/ActPaper). Not live scraping - this is meant to be
+run manually or on a schedule (e.g. monthly), never per user request, and
+never as part of the ams app server.
 
 There is no server-side filter for jurisdiction on India Code's API (only
 identifier_collection/author/subject/dateIssued/itemtype are indexed as
@@ -9,8 +9,13 @@ discovery facets - checked live), so this walks the FULL "ACT" collection
 (11,463 items across every state, confirmed live) and filters to the
 requested jurisdictions client-side. For each matching act it then does one
 follow-up query scoped by that act's own `act_id` (NOT by title - title text
-collides across jurisdictions, confirmed by the spike) to pull every SECTION
-item that belongs to it.
+collides across jurisdictions, confirmed by the spike) to pull every related
+item: SECTION (the act's text), and RULE/NOTIFICATION (subordinate delegated
+legislation - the "Act Papers" tab, confirmed live to be real, separate item
+types with their own title/date/PDF, not something bundled into the ACT
+record). Each ACT and ActPaper also gets its own attached source PDF fetched
+via a bundles/bitstreams lookup - roughly doubles the request count for a
+full run, since it's an extra 2 calls per item that has one.
 
     python manage.py import_acts                                  # Central + Tamil Nadu
     python manage.py import_acts --jurisdictions CENTRAL           # Central only
@@ -28,7 +33,7 @@ import requests
 from django.core.management.base import BaseCommand
 from django.utils.dateparse import parse_date
 
-from acts.models import Act, Section
+from acts.models import Act, ActPaper, Section
 
 API = "https://indiacode.gov.in/server/api"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -126,14 +131,41 @@ class IndiaCodeClient:
             if page >= total_pages:
                 return
 
-    def sections_for_act(self, act_id: str) -> list[dict]:
-        """Every SECTION item sharing this act's act_id (confirmed a stable,
-        exact join key - unlike title text, which collides across states)."""
+    def related_items_for_act(self, act_id: str) -> list[dict]:
+        """Every item sharing this act's act_id (confirmed a stable, exact
+        join key - unlike title text, which collides across states):
+        SECTION items, but also RULE and NOTIFICATION items - subordinate
+        delegated legislation and gazette notifications, confirmed live as
+        real, separate India Code item types with their own title/date/PDF,
+        not something bundled into the ACT record. One fetch covers all of
+        them; the caller splits by dc.identifier.collection."""
         data = self._get("/discover/search/objects",
                           query=f"dc.identifier.act_id:{act_id}", size=200)
         objects = data["_embedded"]["searchResult"]["_embedded"]["objects"]
-        items = [o["_embedded"]["indexableObject"] for o in objects]
-        return [it for it in items if _md(it, "dc.identifier.collection") == "SECTION"]
+        return [o["_embedded"]["indexableObject"] for o in objects]
+
+    def pdf_url_for_item(self, uuid: str) -> str:
+        """The item's own attached source PDF, if any - confirmed live for
+        both ACT and NOTIFICATION items: an "ORIGINAL" bundle holding the
+        PDF, alongside TEXT/THUMBNAIL bundles this doesn't need. Best-effort:
+        a missing/unreachable PDF shouldn't abort importing the rest of the
+        act's data, so failures here are swallowed to an empty string."""
+        try:
+            bundles = self._get(f"/core/items/{uuid}/bundles")
+            for b in bundles.get("_embedded", {}).get("bundles", []):
+                if b.get("name") != "ORIGINAL":
+                    continue
+                href = b.get("_links", {}).get("bitstreams", {}).get("href", "")
+                path = href[len(API):] if href.startswith(API) else href
+                if not path:
+                    continue
+                bitstreams = self._get(path)
+                items = bitstreams.get("_embedded", {}).get("bitstreams", [])
+                if items:
+                    return items[0].get("_links", {}).get("content", {}).get("href", "")
+        except (requests.exceptions.RequestException, TimeoutError):
+            pass
+        return ""
 
 
 class Command(BaseCommand):
@@ -201,29 +233,53 @@ class Command(BaseCommand):
                     no_of_section=_md_int(item, "dc.identifier.no_of_section") or 0,
                     source_act_id=act_id,
                     source_state_id=_md(item, "dc.identifier.state_id"),
+                    pdf_url=client.pdf_url_for_item(source_uuid),
                 ),
             )
 
+            related = client.related_items_for_act(act_id) if act_id else []
+            section_items = [it for it in related if _md(it, "dc.identifier.collection") == "SECTION"]
+            paper_items = [it for it in related
+                           if _md(it, "dc.identifier.collection") in ("RULE", "NOTIFICATION")]
+
             n_sections = 0
-            if act_id:
-                for sec_item in client.sections_for_act(act_id):
-                    source_section_id = _md(sec_item, "dc.identifier.section_id")
-                    sec_title = sec_item.get("name") or ""  # some items carry JSON null here, not a missing key
-                    Section.objects.update_or_create(
+            for sec_item in section_items:
+                source_section_id = _md(sec_item, "dc.identifier.section_id")
+                sec_title = sec_item.get("name") or ""  # some items carry JSON null here, not a missing key
+                Section.objects.update_or_create(
+                    act=act,
+                    source_section_id=source_section_id or f"{act.id}:{sec_title}",
+                    defaults=dict(
+                        number=_md(sec_item, "dc.identifier.section_number"),
+                        title=sec_title,
+                        content=_md(sec_item, "dc.identifier.section_page_note"),
+                        footnote=_md(sec_item, "dc.identifier.section_footnote"),
+                        order_number=_md_int(sec_item, "dc.identifier.order_number") or 0,
+                    ),
+                )
+                n_sections += 1
+
+            n_papers = 0
+            for paper_item in paper_items:
+                paper_type = _md(paper_item, "dc.identifier.collection")
+                paper_title = paper_item.get("name") or ""
+                paper_source_id = (_md(paper_item, "dc.identifier.rule_id")
+                                   or _md(paper_item, "dc.identifier.notification_id"))
+                ActPaper.objects.update_or_create(
+                    source_uuid=paper_item["uuid"],
+                    defaults=dict(
                         act=act,
-                        source_section_id=source_section_id or f"{act.id}:{sec_title}",
-                        defaults=dict(
-                            number=_md(sec_item, "dc.identifier.section_number"),
-                            title=sec_title,
-                            content=_md(sec_item, "dc.identifier.section_page_note"),
-                            footnote=_md(sec_item, "dc.identifier.section_footnote"),
-                            order_number=_md_int(sec_item, "dc.identifier.order_number") or 0,
-                        ),
-                    )
-                    n_sections += 1
+                        paper_type=paper_type,
+                        title=paper_title,
+                        paper_date=parse_date(_md(paper_item, "dc.date.issued")),
+                        pdf_url=client.pdf_url_for_item(paper_item["uuid"]),
+                        source_paper_id=paper_source_id,
+                    ),
+                )
+                n_papers += 1
 
             imported += 1
-            self.stdout.write(f"  [{state_name}] {title} - {n_sections} section(s)")
+            self.stdout.write(f"  [{state_name}] {title} - {n_sections} section(s), {n_papers} paper(s)")
 
             if limit and imported >= limit:
                 self.stdout.write(self.style.WARNING(f"\nStopping at --limit {limit}."))

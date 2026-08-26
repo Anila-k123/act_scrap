@@ -104,3 +104,25 @@ class Section(models.Model):
 
     def __str__(self):
         return f'Section {self.number}: {self.title}'
+
+
+class ActPaper(models.Model):
+    """Subordinate delegated legislation tied to an act - the "Act Papers"
+    tab. Confirmed live: RULE and NOTIFICATION items share the parent act's
+    act_id (same reliable join key Section uses), each with its own title,
+    date, and attached PDF - a real, distinct India Code item type, not
+    something bundled into the ACT record itself."""
+    act = models.ForeignKey(Act, on_delete=models.CASCADE, related_name='papers')
+    paper_type = models.CharField(max_length=32)   # "RULE" | "NOTIFICATION"
+    title = models.CharField(max_length=512, blank=True)
+    paper_date = models.DateField(null=True, blank=True)
+    pdf_url = models.URLField(max_length=1024, blank=True)
+
+    source_uuid = models.CharField(max_length=64, unique=True)
+    source_paper_id = models.CharField(max_length=128, blank=True)
+
+    class Meta:
+        ordering = ['-paper_date']
+
+    def __str__(self):
+        return f'{self.paper_type}: {self.title}'
