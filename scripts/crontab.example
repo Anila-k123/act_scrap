@@ -9,9 +9,16 @@
 # equivalent shell wrappers if you want the exact same log files on Linux,
 # or just redirect stdout/stderr from cron directly as shown here.
 
+# `timeout 4h` mirrors the 4-hour ExecutionTimeLimit set on the Windows
+# tasks - the import has retry-with-backoff for ordinary transient failures,
+# but a genuine hang inside one blocking HTTP call (confirmed live, past its
+# own 30s timeout) can't retry its way out. Without a hard cap, cron just
+# lets it sit forever unattended. Safe either way since imports are
+# idempotent - the next scheduled run resumes cleanly.
+
 # Monthly, 1st of every month at 02:00 - picks up newly published acts only.
-0 2 1 * * cd /opt/acts-importer && ./venv/bin/python manage.py import_acts >> logs/monthly.log 2>&1
+0 2 1 * * cd /opt/acts-importer && timeout 4h ./venv/bin/python manage.py import_acts >> logs/monthly.log 2>&1
 
 # Quarterly, 1st of Jan/Apr/Jul/Oct at 03:00 - full --refresh, re-syncs
 # acts already stored too (catches amendments/repeals the monthly run misses).
-0 3 1 1,4,7,10 * cd /opt/acts-importer && ./venv/bin/python manage.py import_acts --refresh >> logs/quarterly_refresh.log 2>&1
+0 3 1 1,4,7,10 * cd /opt/acts-importer && timeout 4h ./venv/bin/python manage.py import_acts --refresh >> logs/quarterly_refresh.log 2>&1
