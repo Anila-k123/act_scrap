@@ -102,6 +102,16 @@ class Command(BaseCommand):
                              help="Re-sync acts already stored, instead of skipping them.")
 
     def handle(self, *args, **options):
+        # Windows' console/file default encoding (cp1252) can't represent every
+        # character India Code's act titles carry (confirmed live - crashed a
+        # full run partway through on one such title). Progress up to that
+        # point was NOT lost - the DB write happens before this line - but
+        # force UTF-8 so a title never kills the whole run again.
+        for stream in (self.stdout, self.stderr):
+            underlying = getattr(stream, "_out", None)
+            if underlying is not None and hasattr(underlying, "reconfigure"):
+                underlying.reconfigure(encoding="utf-8", errors="replace")
+
         jurisdictions = {j.strip() for j in options["jurisdictions"].split(",") if j.strip()}
         limit = options["limit"]
         refresh = options["refresh"]
