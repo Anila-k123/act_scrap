@@ -1,0 +1,19 @@
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite3
+
+# IDE / OS
+.vscode/
+.idea/
+*.iml
+Thumbs.db
+.DS_Store
