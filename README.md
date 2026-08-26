@@ -14,9 +14,9 @@ a scheduled task (cron / Windows Task Scheduler).
   comes in, it scrapes right then, and returns. Acts data isn't like that:
   it's imported in bulk, occasionally, ahead of time.
 - `ams` (the main app server) reads Acts data but must never scrape or import
-  it — that's what caused this to be split out in the first place. `ams`
-  will eventually have its own read-only, unmanaged models pointing at these
-  same tables (mirroring how it already treats tables it doesn't own).
+  it — that's what caused this to be split out in the first place. `ams` has
+  its own read-only, unmanaged models (`acts` app) pointing at these same
+  tables, mirroring how it already treats tables it doesn't own.
 - This project writes into the **same Postgres database** (`advocate_db`)
   `ams` uses, via its own `.env` — the two codebases share a database, not a
   process or a repo.
@@ -42,6 +42,34 @@ copy .env.example .env   # fill in DB credentials (same as ams's .env)
 ./venv/Scripts/python manage.py import_acts --limit 20     # smoke test
 ./venv/Scripts/python manage.py import_acts --refresh       # re-sync stored acts
 ```
+
+## Scheduling
+
+Two cadences, for two different reasons:
+
+- **Monthly, default mode** (`import_acts`, no flags) — cheap, skips every
+  act already stored, only picks up newly published ones. Legislative
+  activity is slow enough that daily/weekly would just be wasted, polite
+  traffic against a public government API for no benefit.
+- **Quarterly, `--refresh`** — the expensive full re-sync (walks the whole
+  ~11,463-item catalog again, same cost as the original backfill). Needed
+  because the monthly run's skip-existing behavior never catches amendments
+  or repeals to acts already imported — only a `--refresh` re-fetches them.
+
+`scripts/run_monthly.ps1` and `scripts/run_quarterly_refresh.ps1` wrap those
+two calls with logging to `logs/`. **Local dev machine (this one):**
+`scripts/setup_windows_tasks.ps1` registers both as Windows Task Scheduler
+jobs (1st of the month, 02:00 / 03:00) — run it once, safe to re-run.
+
+**Moving to production:** Task Scheduler entries are OS config, not part of
+this repo — they won't come along when the code moves to another server, on
+Windows or not. What travels is the *schedule itself* (what runs, when, with
+which flags), already captured in the two wrapper scripts and
+`scripts/crontab.example`. Setting this up on the production server is then
+just "point whatever scheduler it has (cron, Task Scheduler, a cloud
+scheduler) at these same two commands" — not re-deriving the cadence from
+scratch. No need to schedule anything extra now in anticipation of the move;
+there's nothing about doing it now vs. later that saves work then.
 
 ## Known data gaps (confirmed live against India Code, not bugs here)
 

@@ -11,6 +11,9 @@ __pycache__/
 *.py[cod]
 *.sqlite3
 
+# Scheduled-run logs
+logs/*.log
+
 # IDE / OS
 .vscode/
 .idea/

@@ -1,0 +1,17 @@
+# Reference cron lines for a Linux production host - NOT active anywhere,
+# just documents the same schedule scripts/setup_windows_tasks.ps1 registers
+# locally on Windows, translated to cron. Wire these into the production
+# server's actual crontab (`crontab -e`) once that server exists; adjust the
+# path if the project doesn't live at /opt/acts-importer there.
+#
+# Both jobs log their own output already (see run_monthly.ps1 /
+# run_quarterly_refresh.ps1's Windows equivalents below) - give them
+# equivalent shell wrappers if you want the exact same log files on Linux,
+# or just redirect stdout/stderr from cron directly as shown here.
+
+# Monthly, 1st of every month at 02:00 - picks up newly published acts only.
+0 2 1 * * cd /opt/acts-importer && ./venv/bin/python manage.py import_acts >> logs/monthly.log 2>&1
+
+# Quarterly, 1st of Jan/Apr/Jul/Oct at 03:00 - full --refresh, re-syncs
+# acts already stored too (catches amendments/repeals the monthly run misses).
+0 3 1 1,4,7,10 * cd /opt/acts-importer && ./venv/bin/python manage.py import_acts --refresh >> logs/quarterly_refresh.log 2>&1
