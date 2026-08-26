@@ -161,12 +161,13 @@ class Command(BaseCommand):
             if act_id:
                 for sec_item in client.sections_for_act(act_id):
                     source_section_id = _md(sec_item, "dc.identifier.section_id")
+                    sec_title = sec_item.get("name") or ""  # some items carry JSON null here, not a missing key
                     Section.objects.update_or_create(
                         act=act,
-                        source_section_id=source_section_id or f"{act.id}:{sec_item.get('name','')}",
+                        source_section_id=source_section_id or f"{act.id}:{sec_title}",
                         defaults=dict(
                             number=_md(sec_item, "dc.identifier.section_number"),
-                            title=sec_item.get("name", ""),
+                            title=sec_title,
                             content=_md(sec_item, "dc.identifier.section_page_note"),
                             footnote=_md(sec_item, "dc.identifier.section_footnote"),
                             order_number=_md_int(sec_item, "dc.identifier.order_number") or 0,
