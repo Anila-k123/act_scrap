@@ -35,6 +35,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 DEFAULT_JURISDICTIONS = ["CENTRAL", "Tamil Nadu"]
 PAGE_SIZE = 100
 REQUEST_DELAY = 0.3  # seconds between requests - be a polite, non-live citizen
+RETRIES = 5
+RETRY_BACKOFF_BASE = 5  # seconds; doubles each attempt (5, 10, 20, 40, 80)
 
 
 def _md(item: dict, key: str) -> str:
@@ -57,10 +59,25 @@ class IndiaCodeClient:
         self.session.headers["User-Agent"] = UA
 
     def _get(self, path: str, **params) -> dict:
-        r = self.session.get(f"{API}{path}", params=params, timeout=30)
-        r.raise_for_status()
-        time.sleep(REQUEST_DELAY)
-        return r.json()
+        # India Code is confirmed intermittently flaky (connect timeouts, and
+        # separately a hang well past this method's own 30s timeout - seen
+        # live during a full run). A single blip anywhere across the ~1,250+
+        # requests one run makes must not kill the whole thing, especially
+        # now this runs unattended on a schedule with no one to restart it.
+        last_exc = None
+        for attempt in range(1, RETRIES + 1):
+            try:
+                r = self.session.get(f"{API}{path}", params=params, timeout=30)
+                r.raise_for_status()
+                time.sleep(REQUEST_DELAY)
+                return r.json()
+            except requests.exceptions.RequestException as exc:
+                last_exc = exc
+                if attempt < RETRIES:
+                    wait = RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
+                    print(f"  [{attempt}/{RETRIES}] {path} failed ({exc}) - retrying in {wait}s")
+                    time.sleep(wait)
+        raise last_exc
 
     def iter_act_items(self):
         """Every item in the ACT collection, across all jurisdictions, paginated."""
