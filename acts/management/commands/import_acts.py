@@ -20,6 +20,8 @@ item that belongs to it.
 
 from __future__ import annotations
 
+import queue
+import threading
 import time
 
 import requests
@@ -37,6 +39,7 @@ PAGE_SIZE = 100
 REQUEST_DELAY = 0.3  # seconds between requests - be a polite, non-live citizen
 RETRIES = 5
 RETRY_BACKOFF_BASE = 5  # seconds; doubles each attempt (5, 10, 20, 40, 80)
+HANG_GUARD_SECONDS = 45  # hard wall-clock cap per request - see _get()
 
 
 def _md(item: dict, key: str) -> str:
@@ -58,25 +61,52 @@ class IndiaCodeClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = UA
 
+    def _raw_get(self, path: str, params: dict, out: queue.Queue) -> None:
+        try:
+            r = self.session.get(f"{API}{path}", params=params, timeout=30)
+            r.raise_for_status()
+            out.put(("ok", r.json()))
+        except requests.exceptions.RequestException as exc:
+            out.put(("error", exc))
+
     def _get(self, path: str, **params) -> dict:
-        # India Code is confirmed intermittently flaky (connect timeouts, and
-        # separately a hang well past this method's own 30s timeout - seen
-        # live during a full run). A single blip anywhere across the ~1,250+
-        # requests one run makes must not kill the whole thing, especially
-        # now this runs unattended on a schedule with no one to restart it.
+        # India Code is confirmed intermittently flaky: plain connect
+        # timeouts (raises cleanly, retry loop below handles it), and
+        # separately a genuine multi-minute hang with ZERO open socket -
+        # confirmed live via netstat, meaning it never even reached the
+        # connect/read phase requests' own `timeout=30` bounds. That's a
+        # known real gotcha (DNS resolution isn't covered by requests'
+        # timeout on some systems) - no exception is ever raised to retry,
+        # so the loop below alone can't save it.
+        #
+        # A daemon=True thread per attempt fixes it: join(timeout=...) lets
+        # the main thread give up and retry on a fresh thread without
+        # waiting for the hung one, and being daemon means it can't block
+        # process exit either (unlike ThreadPoolExecutor's default
+        # shutdown(wait=True) on its context-manager exit, which would just
+        # move the hang to when the script tries to quit). The abandoned
+        # thread leaks until the OS-level hang itself eventually resolves -
+        # harmless for a batch job.
         last_exc = None
         for attempt in range(1, RETRIES + 1):
-            try:
-                r = self.session.get(f"{API}{path}", params=params, timeout=30)
-                r.raise_for_status()
-                time.sleep(REQUEST_DELAY)
-                return r.json()
-            except requests.exceptions.RequestException as exc:
-                last_exc = exc
-                if attempt < RETRIES:
-                    wait = RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
-                    print(f"  [{attempt}/{RETRIES}] {path} failed ({exc}) - retrying in {wait}s")
-                    time.sleep(wait)
+            out: queue.Queue = queue.Queue(maxsize=1)
+            t = threading.Thread(target=self._raw_get, args=(path, params, out), daemon=True)
+            t.start()
+            t.join(timeout=HANG_GUARD_SECONDS)
+
+            if t.is_alive():
+                last_exc = TimeoutError(f"{path} hung past {HANG_GUARD_SECONDS}s hard cap")
+            else:
+                kind, payload = out.get()
+                if kind == "ok":
+                    time.sleep(REQUEST_DELAY)
+                    return payload
+                last_exc = payload
+
+            if attempt < RETRIES:
+                wait = RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
+                print(f"  [{attempt}/{RETRIES}] {path} failed ({last_exc}) - retrying in {wait}s")
+                time.sleep(wait)
         raise last_exc
 
     def iter_act_items(self):
