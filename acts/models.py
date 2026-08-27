@@ -25,6 +25,10 @@ Field notes from the spike (python manage.py spike_fetch_act):
     "The Right to Information Act, 2005" to a Rajasthan act, then a
     Maharashtra one, before the actual central Act) - title alone is not a
     safe unique key.
+  - Every title field is a TextField, not CharField(max_length=...) -
+    confirmed live: an ActPaper.title crashed a run past a 512-char limit.
+    RULE/NOTIFICATION titles in particular can be long free-text
+    descriptions, not short labels.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from django.db import models
 
 
 class Act(models.Model):
-    title = models.CharField(max_length=512)
+    title = models.TextField()   # some titles run well past 512 chars - see ActPaper note below
     long_title = models.TextField(blank=True)
     abstract = models.TextField(blank=True)          # dc.description.abstract
     preamble_html = models.TextField(blank=True)      # dc.identifier.preamble_description
@@ -75,7 +79,7 @@ class Act(models.Model):
 class Chapter(models.Model):
     act = models.ForeignKey(Act, on_delete=models.CASCADE, related_name='chapters')
     number = models.CharField(max_length=32, blank=True)   # e.g. "I", "II" - source format varies
-    title = models.CharField(max_length=512, blank=True)
+    title = models.TextField(blank=True)
     order = models.IntegerField(default=0)
 
     class Meta:
@@ -91,7 +95,7 @@ class Section(models.Model):
                                 related_name='sections')
 
     number = models.CharField(max_length=32)   # string, not int - sub-sections like "3A" exist
-    title = models.CharField(max_length=512, blank=True)
+    title = models.TextField(blank=True)
     content = models.TextField(blank=True)      # dc.identifier.section_page_note, verbatim
     footnote = models.TextField(blank=True)     # dc.identifier.section_footnote, verbatim
     order_number = models.IntegerField(default=0)
@@ -114,7 +118,7 @@ class ActPaper(models.Model):
     something bundled into the ACT record itself."""
     act = models.ForeignKey(Act, on_delete=models.CASCADE, related_name='papers')
     paper_type = models.CharField(max_length=32)   # "RULE" | "NOTIFICATION"
-    title = models.CharField(max_length=512, blank=True)
+    title = models.TextField(blank=True)   # confirmed live: crashed a run - some run well past 512 chars
     paper_date = models.DateField(null=True, blank=True)
     pdf_url = models.URLField(max_length=1024, blank=True)
 
