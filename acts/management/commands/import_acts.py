@@ -205,6 +205,12 @@ class Command(BaseCommand):
             if state_name not in jurisdictions:
                 continue
             matched += 1
+            if matched % 25 == 0:
+                # ~1,250 as of the last full discovery scan (846 Central + 404
+                # Tamil Nadu) - an approximate denominator, not a live count;
+                # India Code's own catalog can grow between runs.
+                self.stdout.write(f"  ... {matched}/~1250 matched so far "
+                                  f"({imported} imported/refreshed, {skipped} skipped)")
 
             source_uuid = item["uuid"]
             if not refresh and Act.objects.filter(source_uuid=source_uuid).exists():
