@@ -14,6 +14,9 @@ __pycache__/
 # Scheduled-run logs
 logs/*.log
 
+# Discovery-scan resume checkpoint (runtime state, not source)
+.import_checkpoint.json
+
 # IDE / OS
 .vscode/
 .idea/

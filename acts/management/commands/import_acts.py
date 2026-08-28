@@ -17,17 +17,26 @@ record). Each ACT and ActPaper also gets its own attached source PDF fetched
 via a bundles/bitstreams lookup - roughly doubles the request count for a
 full run, since it's an extra 2 calls per item that has one.
 
+The discovery scan's current page is checkpointed to .import_checkpoint.json
+(gitignored) as it goes, and cleared on natural completion. An interrupted
+run resumes near where it left off instead of re-walking all ~115 pages from
+page 0 - the checkpoint is only trusted if it was left by a run with the
+same --jurisdictions/--refresh; --limit smoke tests never read or write one.
+
     python manage.py import_acts                                  # Central + Tamil Nadu
     python manage.py import_acts --jurisdictions CENTRAL           # Central only
     python manage.py import_acts --limit 20                        # smoke test
     python manage.py import_acts --refresh                         # re-sync acts already stored
+    python manage.py import_acts --refresh --no-resume             # ignore any saved checkpoint
 """
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
+from pathlib import Path
 
 import requests
 from django.core.management.base import BaseCommand
@@ -45,6 +54,40 @@ REQUEST_DELAY = 0.3  # seconds between requests - be a polite, non-live citizen
 RETRIES = 5
 RETRY_BACKOFF_BASE = 5  # seconds; doubles each attempt (5, 10, 20, 40, 80)
 HANG_GUARD_SECONDS = 45  # hard wall-clock cap per request - see _get()
+
+# Discovery-scan checkpoint. Repeated interruptions tonight (network blips,
+# session restarts) each made a run walk all ~115 discovery pages over again
+# from page 0 before it could even get back to where it left off - the
+# per-item work already done wasn't lost (every write commits immediately),
+# but the SCAN itself restarted every time. This persists the current page
+# so a resumed run picks up close to where the last one stopped instead.
+CHECKPOINT_FILE = Path(__file__).resolve().parents[3] / ".import_checkpoint.json"
+
+
+def _load_checkpoint(jurisdictions: set[str], refresh: bool) -> int:
+    if not CHECKPOINT_FILE.exists():
+        return 0
+    try:
+        data = json.loads(CHECKPOINT_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return 0
+    # Only trust a checkpoint left by the same kind of run - a checkpoint from
+    # a --refresh pass shouldn't make a plain skip-existing run jump ahead and
+    # miss acts, and vice versa.
+    if sorted(data.get("jurisdictions", [])) != sorted(jurisdictions) or data.get("refresh") != refresh:
+        return 0
+    return int(data.get("page", 0))
+
+
+def _save_checkpoint(page: int, jurisdictions: set[str], refresh: bool) -> None:
+    CHECKPOINT_FILE.write_text(json.dumps({
+        "page": page, "jurisdictions": sorted(jurisdictions), "refresh": refresh,
+    }))
+
+
+def _clear_checkpoint() -> None:
+    if CHECKPOINT_FILE.exists():
+        CHECKPOINT_FILE.unlink()
 
 
 def _md(item: dict, key: str) -> str:
@@ -114,9 +157,15 @@ class IndiaCodeClient:
                 time.sleep(wait)
         raise last_exc
 
-    def iter_act_items(self):
-        """Every item in the ACT collection, across all jurisdictions, paginated."""
-        page = 0
+    def iter_act_items(self, jurisdictions: set[str], refresh: bool, use_checkpoint: bool = True):
+        """Every item in the ACT collection, across all jurisdictions, paginated.
+        Resumes from a saved checkpoint page if one matches this run's
+        jurisdictions/refresh mode; clears it on natural completion.
+        use_checkpoint=False (--limit smoke tests) never reads or writes one,
+        so a quick test run can't leave state that skips acts in a real run."""
+        page = _load_checkpoint(jurisdictions, refresh) if use_checkpoint else 0
+        if page:
+            print(f"Resuming discovery scan from page {page} (checkpoint found)")
         while True:
             data = self._get("/discover/search/objects", **{
                 "f.identifier_collection": "ACT,equals",
@@ -129,7 +178,11 @@ class IndiaCodeClient:
             total_pages = result["page"]["totalPages"]
             page += 1
             if page >= total_pages:
+                if use_checkpoint:
+                    _clear_checkpoint()
                 return
+            if use_checkpoint:
+                _save_checkpoint(page, jurisdictions, refresh)
 
     def related_items_for_act(self, act_id: str) -> list[dict]:
         """Every item sharing this act's act_id (confirmed a stable, exact
@@ -179,6 +232,9 @@ class Command(BaseCommand):
                              help="Stop after importing this many acts (for smoke-testing).")
         parser.add_argument("--refresh", action="store_true",
                              help="Re-sync acts already stored, instead of skipping them.")
+        parser.add_argument("--no-resume", action="store_true",
+                             help="Ignore any saved checkpoint and start the discovery "
+                                  "scan from page 0, even if one matches this run.")
 
     def handle(self, *args, **options):
         # Windows' console/file default encoding (cp1252) can't represent every
@@ -195,12 +251,15 @@ class Command(BaseCommand):
         limit = options["limit"]
         refresh = options["refresh"]
 
+        if options["no_resume"]:
+            _clear_checkpoint()
+
         client = IndiaCodeClient()
         imported = skipped = matched = 0
 
         self.stdout.write(f"Scanning India Code's ACT collection for: {sorted(jurisdictions)}\n")
 
-        for item in client.iter_act_items():
+        for item in client.iter_act_items(jurisdictions, refresh, use_checkpoint=not limit):
             state_name = _md(item, "dc.identifier.state_name")
             if state_name not in jurisdictions:
                 continue
